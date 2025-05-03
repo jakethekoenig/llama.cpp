@@ -1,0 +1,3 @@
+add_executable(probability_input probability_input.cpp)
+target_link_libraries(probability_input PRIVATE common llama)
+set_property(TARGET probability_input PROPERTY CXX_STANDARD 11)

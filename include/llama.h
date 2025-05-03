@@ -1014,6 +1014,10 @@ extern "C" {
     LLAMA_API float llama_vocab_get_score(const struct llama_vocab * vocab, llama_token token);
 
     LLAMA_API enum llama_token_attr llama_vocab_get_attr(const struct llama_vocab * vocab, llama_token token);
+    
+    // Get the token embedding for a specific token in the model's vocabulary
+    // Returns a pointer to the embedding array of size n_embd, or NULL on failure
+    LLAMA_API float * llama_token_get_embedding(const struct llama_model * model, llama_token token);
 
     // Check if the token is supposed to end generation (end-of-generation, eg. EOS, EOT, etc.)
     LLAMA_API bool llama_vocab_is_eog(const struct llama_vocab * vocab, llama_token token);
