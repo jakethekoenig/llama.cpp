@@ -338,3 +338,18 @@ const char * llama_print_system_info(void) {
 
     return s.c_str();
 }
+
+float * llama_token_get_embedding(const struct llama_model * model, llama_token token) {
+    if (!model || token < 0 || token >= llama_vocab_n_tokens(llama_model_get_vocab(model))) {
+        return nullptr;
+    }
+
+    if (!model->tok_embd) {
+        return nullptr; // Token embedding table not loaded
+    }
+
+    const int n_embd = llama_model_n_embd(model);
+    
+    // Get pointer to the embedding data for the specified token
+    return (float*)((char *) model->tok_embd->data + token * ggml_element_size(model->tok_embd) * n_embd);
+}
