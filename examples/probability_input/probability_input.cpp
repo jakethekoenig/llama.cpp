@@ -215,36 +215,138 @@ int main(int argc, char** argv) {
             }
         }
         
-        // If no format worked, fallback to using raw number tokens even if not optimal
+        // If no format worked, try alternative tokenization approaches
         if (!found_unique_format) {
-            printf("No format with unique tokens found. Using raw numbers.\n");
+            printf("No format with unique tokens found. Trying alternative approaches.\n");
             
-            for (int i = 1; i <= 10; i++) {
-                llama_token special_token = i; // Use token ID directly
+            // Try several different formatting options for numbers
+            std::vector<std::string> number_formats = {
+                " %d ",    // Space before and after
+                "  %d  ",  // Double spaces
+                "%d ",     // Space after only
+                "[%d]",    // Brackets
+                "<%d>",    // Angle brackets
+                "-%d-",    // Dashes
+                "%d:",     // With colon
+                "%d;",     // With semicolon
+                "%d!",     // With exclamation
+                "%d?",     // With question mark
+            };
+            
+            bool success = false;
+            
+            // Try each format until we find one that works
+            for (const auto& format : number_formats) {
+                printf("Trying alternative format: '%s'\n", format.c_str());
                 
-                // Verify token exists in vocabulary
-                char token_text[32] = {0};
-                llama_token_to_piece(vocab, special_token, token_text, sizeof(token_text), 0, true);
+                temp_tokens.clear();
+                bool all_unique = true;
                 
-                if (token_text[0] != '\0') {
-                    number_tokens.push_back(special_token);
-                    printf("Using raw token %d for number %d ('%s')\n", (int)special_token, i, token_text);
-                } else {
-                    // If raw token fails, try with direct number string
-                    std::string num_str = std::to_string(i);
+                for (int i = 1; i <= 10; i++) {
+                    char formatted_num[64];
+                    snprintf(formatted_num, sizeof(formatted_num), format.c_str(), i);
+                    
+                    std::vector<llama_token> tokens(8);
+                    int n_tokens = llama_tokenize(vocab, formatted_num, strlen(formatted_num),
+                                                  tokens.data(), tokens.size(),
+                                                  false, false);
+                    
+                    if (n_tokens > 0) {
+                        tokens.resize(n_tokens);
+                        
+                        // Use first token (should be the main number token)
+                        llama_token token_to_use = tokens[0];
+                        
+                        // Verify it's unique
+                        if (std::find(temp_tokens.begin(), temp_tokens.end(), token_to_use) != temp_tokens.end()) {
+                            all_unique = false;
+                            printf("  Format leads to duplicate tokens for number %d\n", i);
+                            break;
+                        }
+                        
+                        temp_tokens.push_back(token_to_use);
+                        
+                        char token_text[32] = {0};
+                        llama_token_to_piece(vocab, token_to_use, token_text, sizeof(token_text), 0, true);
+                        printf("  Number %d -> token %d ('%s')\n", i, (int)token_to_use, token_text);
+                    } else {
+                        all_unique = false;
+                        fprintf(stderr, "  Failed to tokenize number %d with format %s\n", i, format.c_str());
+                        break;
+                    }
+                }
+                
+                if (all_unique && temp_tokens.size() == 10) {
+                    success = true;
+                    printf("Found alternative format with unique tokens: %s\n", format.c_str());
+                    break;
+                }
+            }
+            
+            // If all formats failed, use a completely different approach: spell out numbers
+            if (!success) {
+                printf("All formats failed. Using spelled out numbers.\n");
+                
+                const char* spelled_numbers[] = {
+                    "one", "two", "three", "four", "five", 
+                    "six", "seven", "eight", "nine", "ten"
+                };
+                
+                temp_tokens.clear();
+                
+                for (int i = 0; i < 10; i++) {
+                    // Try with space prefix for better tokenization
+                    std::string spelled = " ";
+                    spelled += spelled_numbers[i];
+                    
                     std::vector<llama_token> tokens(4);
-                    int n_tokens = llama_tokenize(vocab, num_str.c_str(), num_str.length(), 
-                                                tokens.data(), tokens.size(), 
+                    int n_tokens = llama_tokenize(vocab, spelled.c_str(), spelled.length(),
+                                                 tokens.data(), tokens.size(),
+                                                 false, false);
+                    
+                    if (n_tokens > 0) {
+                        tokens.resize(n_tokens);
+                        temp_tokens.push_back(tokens[0]);
+                        
+                        char token_text[32] = {0};
+                        llama_token_to_piece(vocab, tokens[0], token_text, sizeof(token_text), 0, true);
+                        printf("Spelled number %d ('%s') -> token %d ('%s')\n", 
+                               i+1, spelled_numbers[i], (int)tokens[0], token_text);
+                    } else {
+                        fprintf(stderr, "Failed to tokenize spelled number %d ('%s')\n", 
+                                i+1, spelled_numbers[i]);
+                    }
+                }
+                
+                if (temp_tokens.size() > 0) {
+                    success = true;
+                }
+            }
+            
+            if (success) {
+                // Use the tokens we found with our alternative approaches
+                number_tokens = std::move(temp_tokens);
+            } else {
+                // Last resort: use digit characters
+                printf("All approaches failed. Using digit characters as a last resort.\n");
+                
+                for (int i = 1; i <= 10; i++) {
+                    // Just use the digit character
+                    char digit = '0' + (i % 10);
+                    std::string digit_str(1, digit);
+                    
+                    std::vector<llama_token> tokens(4);
+                    int n_tokens = llama_tokenize(vocab, digit_str.c_str(), digit_str.length(),
+                                                tokens.data(), tokens.size(),
                                                 false, false);
                     
                     if (n_tokens > 0) {
                         tokens.resize(n_tokens);
                         number_tokens.push_back(tokens[0]);
                         
+                        char token_text[32] = {0};
                         llama_token_to_piece(vocab, tokens[0], token_text, sizeof(token_text), 0, true);
-                        printf("Tokenized raw number %d -> token %d ('%s')\n", i, (int)tokens[0], token_text);
-                    } else {
-                        fprintf(stderr, "Failed to tokenize number %d in any format\n", i);
+                        printf("Digit %d -> token %d ('%s')\n", i, (int)tokens[0], token_text);
                     }
                 }
             }
@@ -357,6 +459,15 @@ int main(int argc, char** argv) {
     
     // Create batch with the mixed embedding
     printf("Initializing batch with embedding size %d\n", n_embd);
+    
+    // Make sure context params have embeddings and logits_all enabled
+    ctx_params.embeddings = true;
+    ctx_params.logits_all = true;
+    
+    // Ensure our context is set up for embeddings 
+    llama_set_embeddings(ctx, true);
+    
+    // We need to create the batch properly to get logits
     llama_batch batch = llama_batch_init(1, n_embd, 1);
     
     // Copy mixed embedding to batch
@@ -376,7 +487,7 @@ int main(int argc, char** argv) {
     batch.pos[0] = 0;
     batch.n_seq_id[0] = 1;
     batch.seq_id[0][0] = 0;
-    batch.logits[0] = 1;
+    batch.logits[0] = 1;  // Explicitly request logits for this token
     
     printf("Running inference with mixed embedding...\n");
     
@@ -391,6 +502,10 @@ int main(int argc, char** argv) {
     }
     
     printf("Inference successful!\n");
+    
+    // Force synchronization to ensure all computations are complete
+    llama_synchronize(ctx);
+    printf("Context synchronized\n");
     
     // Safely get and process the output logits
     printf("Getting logits from context...\n");
