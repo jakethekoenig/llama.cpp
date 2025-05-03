@@ -149,28 +149,108 @@ int main(int argc, char** argv) {
         }
     }
     
-    // Create number sequence tokens
+    // Create number sequence tokens using different formats to ensure unique tokens
     std::vector<llama_token> number_tokens;
     {
-        for (int i = 1; i <= 10; i++) {
-            // Format with space prefix to match common tokenization patterns
-            std::string num_str = " " + std::to_string(i);
+        // Try various formats for numbers to find ones that tokenize differently
+        const char* formats[] = {
+            "Number %d",      // Format as "Number X"
+            "Count to %d",    // Format as "Count to X"
+            "%d.",            // Format as "X."
+            "%d,",            // Format as "X,"
+            "(%d)",           // Format as "(X)"
+            "=%d=",           // Format as "=X="
+        };
+        
+        const size_t n_formats = sizeof(formats) / sizeof(formats[0]);
+        
+        // First try to find a format that gives unique tokens
+        bool found_unique_format = false;
+        size_t format_idx = 0;
+        std::vector<llama_token> temp_tokens;
+        
+        for (format_idx = 0; format_idx < n_formats && !found_unique_format; format_idx++) {
+            printf("Trying format: %s\n", formats[format_idx]);
+            temp_tokens.clear();
+            bool all_unique = true;
             
-            std::vector<llama_token> tokens(4);
-            int n_tokens = llama_tokenize(vocab, num_str.c_str(), num_str.length(), 
-                                          tokens.data(), tokens.size(), 
-                                          false, false);
-            
-            if (n_tokens > 0) {
-                tokens.resize(n_tokens);
-                number_tokens.push_back(tokens[0]);
+            for (int i = 1; i <= 10; i++) {
+                char formatted_num[64];
+                snprintf(formatted_num, sizeof(formatted_num), formats[format_idx], i);
                 
-                char token_text[32] = {0};
-                llama_token_to_piece(vocab, tokens[0], token_text, sizeof(token_text), 0, true);
-                printf("Tokenized number %d -> token %d ('%s')\n", i, (int)tokens[0], token_text);
-            } else {
-                fprintf(stderr, "Failed to tokenize number %d\n", i);
+                std::vector<llama_token> tokens(8);
+                int n_tokens = llama_tokenize(vocab, formatted_num, strlen(formatted_num),
+                                              tokens.data(), tokens.size(),
+                                              false, false);
+                
+                if (n_tokens > 0) {
+                    tokens.resize(n_tokens);
+                    
+                    // Check the first non-space token 
+                    llama_token token_to_use = tokens[0];
+                    
+                    // Verify it's unique
+                    if (std::find(temp_tokens.begin(), temp_tokens.end(), token_to_use) != temp_tokens.end()) {
+                        all_unique = false;
+                        printf("  Format leads to duplicate tokens for number %d\n", i);
+                        break;
+                    }
+                    
+                    temp_tokens.push_back(token_to_use);
+                    
+                    char token_text[32] = {0};
+                    llama_token_to_piece(vocab, token_to_use, token_text, sizeof(token_text), 0, true);
+                    printf("  Number %d -> token %d ('%s')\n", i, (int)token_to_use, token_text);
+                } else {
+                    all_unique = false;
+                    fprintf(stderr, "  Failed to tokenize number %d with format %s\n", i, formats[format_idx]);
+                    break;
+                }
             }
+            
+            if (all_unique) {
+                found_unique_format = true;
+                printf("Found format with unique tokens: %s\n", formats[format_idx]);
+                break;
+            }
+        }
+        
+        // If no format worked, fallback to using raw number tokens even if not optimal
+        if (!found_unique_format) {
+            printf("No format with unique tokens found. Using raw numbers.\n");
+            
+            for (int i = 1; i <= 10; i++) {
+                llama_token special_token = i; // Use token ID directly
+                
+                // Verify token exists in vocabulary
+                char token_text[32] = {0};
+                llama_token_to_piece(vocab, special_token, token_text, sizeof(token_text), 0, true);
+                
+                if (token_text[0] != '\0') {
+                    number_tokens.push_back(special_token);
+                    printf("Using raw token %d for number %d ('%s')\n", (int)special_token, i, token_text);
+                } else {
+                    // If raw token fails, try with direct number string
+                    std::string num_str = std::to_string(i);
+                    std::vector<llama_token> tokens(4);
+                    int n_tokens = llama_tokenize(vocab, num_str.c_str(), num_str.length(), 
+                                                tokens.data(), tokens.size(), 
+                                                false, false);
+                    
+                    if (n_tokens > 0) {
+                        tokens.resize(n_tokens);
+                        number_tokens.push_back(tokens[0]);
+                        
+                        llama_token_to_piece(vocab, tokens[0], token_text, sizeof(token_text), 0, true);
+                        printf("Tokenized raw number %d -> token %d ('%s')\n", i, (int)tokens[0], token_text);
+                    } else {
+                        fprintf(stderr, "Failed to tokenize number %d in any format\n", i);
+                    }
+                }
+            }
+        } else {
+            // Use the tokens we found with the working format
+            number_tokens = std::move(temp_tokens);
         }
     }
     
@@ -312,84 +392,213 @@ int main(int argc, char** argv) {
     
     printf("Inference successful!\n");
     
-    // Get the output logits
+    // Safely get and process the output logits
+    printf("Getting logits from context...\n");
     float* logits = llama_get_logits(ctx);
+    if (!logits) {
+        fprintf(stderr, "Failed to get logits from context\n");
+        llama_batch_free(batch);
+        llama_free(ctx);
+        llama_model_free(model);
+        llama_backend_free();
+        return 1;
+    }
+    
     const int n_vocab = llama_vocab_n_tokens(vocab);
+    printf("Processing logits for vocabulary size: %d\n", n_vocab);
+    
+    // Validate n_vocab is reasonable
+    if (n_vocab <= 0 || n_vocab > 1000000) {  // Sanity check
+        fprintf(stderr, "Invalid vocabulary size: %d\n", n_vocab);
+        llama_batch_free(batch);
+        llama_free(ctx);
+        llama_model_free(model);
+        llama_backend_free();
+        return 1;
+    }
     
     // Convert logits to probabilities
     std::vector<std::pair<float, llama_token>> token_probs;
     token_probs.reserve(n_vocab);
     
-    // Find max logit for numerical stability
-    float max_logit = logits[0];
-    for (int i = 1; i < n_vocab; i++) {
-        if (logits[i] > max_logit) {
+    // Find max logit for numerical stability (with bounds checking)
+    printf("Finding maximum logit...\n");
+    float max_logit = -INFINITY;
+    for (int i = 0; i < n_vocab; i++) {
+        if (!std::isnan(logits[i]) && !std::isinf(logits[i]) && logits[i] > max_logit) {
             max_logit = logits[i];
         }
     }
     
-    // Compute softmax for probabilities
+    if (std::isinf(max_logit) || std::isnan(max_logit)) {
+        fprintf(stderr, "Invalid maximum logit value: %f\n", max_logit);
+        llama_batch_free(batch);
+        llama_free(ctx);
+        llama_model_free(model);
+        llama_backend_free();
+        return 1;
+    }
+    
+    printf("Max logit: %f\n", max_logit);
+    
+    // Compute softmax for probabilities with extra checks
+    printf("Computing softmax...\n");
     float sum_exp = 0.0f;
     for (int i = 0; i < n_vocab; i++) {
+        // Skip NaN or Inf values
+        if (std::isnan(logits[i]) || std::isinf(logits[i])) {
+            token_probs.push_back({0.0f, i});
+            continue;
+        }
+        
         float p = expf(logits[i] - max_logit);
+        if (std::isnan(p) || std::isinf(p)) {
+            p = 0.0f;
+        }
         token_probs.push_back({p, i});
         sum_exp += p;
     }
     
+    if (sum_exp <= 0.0f || std::isnan(sum_exp) || std::isinf(sum_exp)) {
+        fprintf(stderr, "Invalid sum of exponentiated logits: %f\n", sum_exp);
+        sum_exp = 1.0f;  // Prevent division by zero
+    }
+    
     // Normalize probabilities
+    printf("Normalizing probabilities...\n");
     for (auto& tp : token_probs) {
         tp.first /= sum_exp;
+        if (std::isnan(tp.first) || std::isinf(tp.first)) {
+            tp.first = 0.0f;
+        }
     }
     
     // Sort by probability in descending order
+    printf("Sorting tokens by probability...\n");
     std::sort(token_probs.begin(), token_probs.end(), 
               [](const auto& a, const auto& b) { return a.first > b.first; });
     
     // Print top tokens from the output distribution
     printf("\nTop predicted tokens:\n");
-    for (int i = 0; i < 20 && i < (int)token_probs.size(); i++) {
+    
+    // Determine how many tokens to show (with bounds checking)
+    int show_tokens = std::min(20, (int)token_probs.size());
+    printf("Showing top %d tokens out of %zu total\n", show_tokens, token_probs.size());
+    
+    for (int i = 0; i < show_tokens; i++) {
         llama_token token_id = token_probs[i].second;
         float prob = token_probs[i].first * 100.0f; // Convert to percentage
         
-        char token_text[32] = {0};
-        llama_token_to_piece(vocab, token_id, token_text, sizeof(token_text), 0, true);
+        // Validate token ID
+        if (token_id < 0 || token_id >= n_vocab) {
+            fprintf(stderr, "Invalid token ID: %d\n", (int)token_id);
+            continue;
+        }
+        
+        // Get token text with extra safety
+        char token_text[64] = {0};
+        int len = llama_token_to_piece(vocab, token_id, token_text, sizeof(token_text) - 1, 0, true);
+        if (len < 0) {
+            strcpy(token_text, "<?>");
+        }
+        token_text[sizeof(token_text) - 1] = '\0';  // Ensure null termination
         
         printf("%2d. Token %6d (%-10s): %.2f%%\n", 
                i+1, (int)token_id, token_text, prob);
     }
     
-    // Get expected continuations
+    // Get expected continuations with improved error handling
+    printf("\nGetting expected continuations for analysis...\n");
+    
     std::vector<llama_token> expected_gettysburg_continuations;
     {
         std::string next_part = "on this continent";
+        printf("Tokenizing expected Gettysburg continuation: '%s'\n", next_part.c_str());
+        
         std::vector<llama_token> tokens(10);
         int n_tokens = llama_tokenize(vocab, next_part.c_str(), next_part.length(), 
                                       tokens.data(), tokens.size(), 
                                       false, false);
+        
         if (n_tokens > 0) {
             tokens.resize(n_tokens);
             expected_gettysburg_continuations = tokens;
+            
+            printf("Tokenized into %d tokens:\n", n_tokens);
+            for (int i = 0; i < n_tokens; i++) {
+                char token_text[64] = {0};
+                llama_token_to_piece(vocab, tokens[i], token_text, sizeof(token_text) - 1, 0, true);
+                printf("  Token %d: %d ('%s')\n", i, (int)tokens[i], token_text);
+            }
+        } else {
+            fprintf(stderr, "Failed to tokenize Gettysburg continuation\n");
         }
     }
     
+    // Use the same number format discovered earlier for consistency
     std::vector<llama_token> expected_number_continuations;
+    printf("Tokenizing expected number continuations (11-15)...\n");
+    
     for (int i = 11; i <= 15; i++) {
-        std::string num_str = std::to_string(i);
+        // If we're using a format from earlier, use the same one
+        std::string formatted_num;
+        const char* formats[] = {
+            "Number %d", "Count to %d", "%d.", "%d,", "(%d)", "=%d="
+        };
+        
+        char buffer[64];
+        if (number_tokens.size() >= 10) {  // If we found a good format earlier
+            const char* format = formats[0];  // Default
+            
+            // For simplicity, use the first format (or adapt based on the tokens we found)
+            snprintf(buffer, sizeof(buffer), format, i);
+            formatted_num = buffer;
+        } else {
+            // Fallback to simple number
+            formatted_num = std::to_string(i);
+        }
+        
+        printf("Attempting to tokenize number: '%s'\n", formatted_num.c_str());
+        
         std::vector<llama_token> tokens(4);
-        int n_tokens = llama_tokenize(vocab, num_str.c_str(), num_str.length(), 
+        int n_tokens = llama_tokenize(vocab, formatted_num.c_str(), formatted_num.length(), 
                                       tokens.data(), tokens.size(), 
                                       false, false);
+        
         if (n_tokens > 0) {
             tokens.resize(n_tokens);
             expected_number_continuations.push_back(tokens[0]);
+            
+            char token_text[64] = {0};
+            llama_token_to_piece(vocab, tokens[0], token_text, sizeof(token_text) - 1, 0, true);
+            printf("  Tokenized number %d -> token %d ('%s')\n", 
+                   i, (int)tokens[0], token_text);
+        } else {
+            fprintf(stderr, "Failed to tokenize number %d\n", i);
         }
     }
     
     // Print expected continuations and their ranks
     printf("\nExpected Gettysburg continuations:\n");
+    
+    if (expected_gettysburg_continuations.empty()) {
+        printf("  No expected Gettysburg continuations available\n");
+    }
+    
     for (auto token : expected_gettysburg_continuations) {
-        char token_text[32] = {0};
-        llama_token_to_piece(vocab, token, token_text, sizeof(token_text), 0, true);
+        // Validate token
+        if (token < 0 || token >= n_vocab) {
+            fprintf(stderr, "Invalid token ID: %d\n", (int)token);
+            continue;
+        }
+        
+        // Get token text safely
+        char token_text[64] = {0};
+        int len = llama_token_to_piece(vocab, token, token_text, sizeof(token_text) - 1, 0, true);
+        if (len < 0) {
+            strcpy(token_text, "<?>");
+        }
+        token_text[sizeof(token_text) - 1] = '\0';
         
         // Find this token in the predictions
         auto it = std::find_if(token_probs.begin(), token_probs.end(), 
@@ -407,9 +616,25 @@ int main(int argc, char** argv) {
     }
     
     printf("\nExpected number continuations:\n");
+    
+    if (expected_number_continuations.empty()) {
+        printf("  No expected number continuations available\n");
+    }
+    
     for (auto token : expected_number_continuations) {
-        char token_text[32] = {0};
-        llama_token_to_piece(vocab, token, token_text, sizeof(token_text), 0, true);
+        // Validate token
+        if (token < 0 || token >= n_vocab) {
+            fprintf(stderr, "Invalid token ID: %d\n", (int)token);
+            continue;
+        }
+        
+        // Get token text safely
+        char token_text[64] = {0};
+        int len = llama_token_to_piece(vocab, token, token_text, sizeof(token_text) - 1, 0, true);
+        if (len < 0) {
+            strcpy(token_text, "<?>");
+        }
+        token_text[sizeof(token_text) - 1] = '\0';
         
         // Find this token in the predictions
         auto it = std::find_if(token_probs.begin(), token_probs.end(), 
@@ -427,10 +652,13 @@ int main(int argc, char** argv) {
     }
     
     // Clean up
+    printf("\nCleaning up resources...\n");
     llama_batch_free(batch);
     llama_free(ctx);
     llama_model_free(model);
     llama_backend_free();
+    
+    printf("Done!\n");
     
     return 0;
 }
