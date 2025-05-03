@@ -8,7 +8,7 @@
 #include <cmath>
 
 // Helper function to create a weighted average of embeddings
-std::vector<float> create_weighted_embedding(
+static std::vector<float> create_weighted_embedding(
     const std::vector<std::vector<float>>& embeddings,
     const std::vector<float>& weights) {
     
@@ -30,7 +30,7 @@ std::vector<float> create_weighted_embedding(
 }
 
 // Print the tokens and their texts
-void print_tokens(const llama_vocab* vocab, const std::vector<llama_token>& tokens, const char* name) {
+static void print_tokens(const llama_vocab* vocab, const std::vector<llama_token>& tokens, const char* name) {
     printf("%s tokens (%zu):\n", name, tokens.size());
     for (size_t i = 0; i < tokens.size(); i++) {
         char token_text[32] = {0};
@@ -38,6 +38,13 @@ void print_tokens(const llama_vocab* vocab, const std::vector<llama_token>& toke
         printf("  %zu: %6d '%s'\n", i, (int)tokens[i], token_text);
     }
     printf("\n");
+}
+
+static void print_usage(int argc, char** argv) {
+    printf("\nUsage: %s -m <model_path> [-ngl <n_gpu_layers>] [-c <context_size>]\n\n", argv[0]);
+    printf("  -m <model_path>: Path to the model file (required)\n");
+    printf("  -ngl <n_gpu_layers>: Number of GPU layers to use (default: 0)\n");
+    printf("  -c <context_size>: Context size (default: 2048)\n\n");
 }
 
 int main(int argc, char** argv) {
@@ -48,24 +55,65 @@ int main(int argc, char** argv) {
     llama_model_params model_params = llama_model_default_params();
     llama_context_params ctx_params = llama_context_default_params();
     
+    // Default parameters
+    std::string model_path;
+    int n_gpu_layers = 0;
+    int n_ctx = 2048;
+    
     // Parse command line arguments
-    gpt_params params;
-    if (!gpt_params_parse(argc, argv, params)) {
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-m") == 0) {
+            if (i + 1 < argc) {
+                model_path = argv[++i];
+            } else {
+                print_usage(argc, argv);
+                return 1;
+            }
+        } else if (strcmp(argv[i], "-ngl") == 0) {
+            if (i + 1 < argc) {
+                try {
+                    n_gpu_layers = std::stoi(argv[++i]);
+                } catch (...) {
+                    print_usage(argc, argv);
+                    return 1;
+                }
+            } else {
+                print_usage(argc, argv);
+                return 1;
+            }
+        } else if (strcmp(argv[i], "-c") == 0) {
+            if (i + 1 < argc) {
+                try {
+                    n_ctx = std::stoi(argv[++i]);
+                } catch (...) {
+                    print_usage(argc, argv);
+                    return 1;
+                }
+            } else {
+                print_usage(argc, argv);
+                return 1;
+            }
+        } else {
+            print_usage(argc, argv);
+            return 1;
+        }
+    }
+    
+    if (model_path.empty()) {
+        fprintf(stderr, "Model path is required\n");
+        print_usage(argc, argv);
         return 1;
     }
     
     // Apply params
-    model_params.n_gpu_layers = params.n_gpu_layers;
-    ctx_params.n_ctx = params.n_ctx;
+    model_params.n_gpu_layers = n_gpu_layers;
+    ctx_params.n_ctx = n_ctx;
     ctx_params.embeddings = true;  // Enable embeddings mode
     
-    // Path to the model
-    const char* model_path = params.model.c_str();
-    
-    printf("Loading model: %s\n", model_path);
-    llama_model* model = llama_model_load_from_file(model_path, model_params);
+    printf("Loading model: %s\n", model_path.c_str());
+    llama_model* model = llama_model_load_from_file(model_path.c_str(), model_params);
     if (!model) {
-        fprintf(stderr, "Failed to load model from '%s'\n", model_path);
+        fprintf(stderr, "Failed to load model from '%s'\n", model_path.c_str());
         return 1;
     }
     
