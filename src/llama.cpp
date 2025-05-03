@@ -340,16 +340,49 @@ const char * llama_print_system_info(void) {
 }
 
 float * llama_token_get_embedding(const struct llama_model * model, llama_token token) {
-    if (!model || token < 0 || token >= llama_vocab_n_tokens(llama_model_get_vocab(model))) {
+    if (!model) {
+        fprintf(stderr, "llama_token_get_embedding: model is NULL\n");
+        return nullptr;
+    }
+    
+    const struct llama_vocab * vocab = llama_model_get_vocab(model);
+    if (!vocab) {
+        fprintf(stderr, "llama_token_get_embedding: vocab is NULL\n");
+        return nullptr;
+    }
+    
+    const int n_vocab = llama_vocab_n_tokens(vocab);
+    if (token < 0 || token >= n_vocab) {
+        fprintf(stderr, "llama_token_get_embedding: token %d out of range (0, %d)\n", token, n_vocab);
         return nullptr;
     }
 
     if (!model->tok_embd) {
-        return nullptr; // Token embedding table not loaded
+        fprintf(stderr, "llama_token_get_embedding: token embedding table not loaded\n");
+        return nullptr;
+    }
+    
+    if (!model->tok_embd->data) {
+        fprintf(stderr, "llama_token_get_embedding: token embedding data is NULL\n");
+        return nullptr;
     }
 
     const int n_embd = llama_model_n_embd(model);
+    if (n_embd <= 0) {
+        fprintf(stderr, "llama_token_get_embedding: invalid embedding size: %d\n", n_embd);
+        return nullptr;
+    }
+    
+    // Calculate the offset into the embedding table
+    const size_t offset = token * ggml_element_size(model->tok_embd) * n_embd;
+    
+    // Ensure we're not going out of bounds
+    if (offset >= ggml_nbytes(model->tok_embd)) {
+        fprintf(stderr, "llama_token_get_embedding: offset %zu exceeds tensor size %zu\n", 
+                offset, ggml_nbytes(model->tok_embd));
+        return nullptr;
+    }
     
     // Get pointer to the embedding data for the specified token
-    return (float*)((char *) model->tok_embd->data + token * ggml_element_size(model->tok_embd) * n_embd);
+    return (float*)((char *) model->tok_embd->data + offset);
 }

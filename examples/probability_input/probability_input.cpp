@@ -153,14 +153,23 @@ int main(int argc, char** argv) {
     std::vector<llama_token> number_tokens;
     {
         for (int i = 1; i <= 10; i++) {
-            std::string num_str = std::to_string(i);
+            // Format with space prefix to match common tokenization patterns
+            std::string num_str = " " + std::to_string(i);
+            
             std::vector<llama_token> tokens(4);
             int n_tokens = llama_tokenize(vocab, num_str.c_str(), num_str.length(), 
                                           tokens.data(), tokens.size(), 
                                           false, false);
+            
             if (n_tokens > 0) {
                 tokens.resize(n_tokens);
                 number_tokens.push_back(tokens[0]);
+                
+                char token_text[32] = {0};
+                llama_token_to_piece(vocab, tokens[0], token_text, sizeof(token_text), 0, true);
+                printf("Tokenized number %d -> token %d ('%s')\n", i, (int)tokens[0], token_text);
+            } else {
+                fprintf(stderr, "Failed to tokenize number %d\n", i);
             }
         }
     }
@@ -171,9 +180,17 @@ int main(int argc, char** argv) {
     
     // Get token embeddings using our new API function
     std::vector<std::vector<float>> gettysburg_embeddings;
-    for (llama_token token : gettysburg_tokens) {
+    for (size_t i = 0; i < gettysburg_tokens.size(); i++) {
+        llama_token token = gettysburg_tokens[i];
+        
+        char token_text[32] = {0};
+        llama_token_to_piece(vocab, token, token_text, sizeof(token_text), 0, true);
+        
+        printf("Getting embedding for Gettysburg token %zu: %d ('%s')\n", i, (int)token, token_text);
+        
         float* embd = llama_token_get_embedding(model, token);
         if (embd) {
+            printf("Successfully got embedding for token %d\n", (int)token);
             gettysburg_embeddings.push_back(std::vector<float>(embd, embd + n_embd));
         } else {
             fprintf(stderr, "Failed to get embedding for token %d\n", (int)token);
@@ -181,9 +198,17 @@ int main(int argc, char** argv) {
     }
     
     std::vector<std::vector<float>> number_embeddings;
-    for (llama_token token : number_tokens) {
+    for (size_t i = 0; i < number_tokens.size(); i++) {
+        llama_token token = number_tokens[i];
+        
+        char token_text[32] = {0};
+        llama_token_to_piece(vocab, token, token_text, sizeof(token_text), 0, true);
+        
+        printf("Getting embedding for number token %zu: %d ('%s')\n", i, (int)token, token_text);
+        
         float* embd = llama_token_get_embedding(model, token);
         if (embd) {
+            printf("Successfully got embedding for token %d\n", (int)token);
             number_embeddings.push_back(std::vector<float>(embd, embd + n_embd));
         } else {
             fprintf(stderr, "Failed to get embedding for token %d\n", (int)token);
@@ -193,13 +218,38 @@ int main(int argc, char** argv) {
     printf("Got %zu Gettysburg embeddings and %zu number embeddings\n", 
            gettysburg_embeddings.size(), number_embeddings.size());
     
+    // Check if we have any embeddings before proceeding
+    if (gettysburg_embeddings.empty() && number_embeddings.empty()) {
+        fprintf(stderr, "No embeddings available. Cannot continue.\n");
+        llama_free(ctx);
+        llama_model_free(model);
+        llama_backend_free();
+        return 1;
+    }
+    
     // Create probabilities for the mixture
-    // Use 0.5 for Gettysburg and 0.5 for numbers
     float weight_gettysburg = 0.5f;
     float weight_numbers = 0.5f;
     
-    std::vector<float> gettysburg_weights(gettysburg_embeddings.size(), weight_gettysburg / gettysburg_embeddings.size());
-    std::vector<float> number_weights(number_embeddings.size(), weight_numbers / number_embeddings.size());
+    // Adjust weights if either set is empty
+    if (gettysburg_embeddings.empty()) {
+        weight_gettysburg = 0.0f;
+        weight_numbers = 1.0f;
+    } else if (number_embeddings.empty()) {
+        weight_gettysburg = 1.0f;
+        weight_numbers = 0.0f;
+    }
+    
+    std::vector<float> gettysburg_weights;
+    std::vector<float> number_weights;
+    
+    if (!gettysburg_embeddings.empty()) {
+        gettysburg_weights.resize(gettysburg_embeddings.size(), weight_gettysburg / gettysburg_embeddings.size());
+    }
+    
+    if (!number_embeddings.empty()) {
+        number_weights.resize(number_embeddings.size(), weight_numbers / number_embeddings.size());
+    }
     
     // Combine all embeddings and weights into single vectors
     std::vector<std::vector<float>> all_embeddings;
@@ -211,14 +261,37 @@ int main(int argc, char** argv) {
     all_weights.insert(all_weights.end(), gettysburg_weights.begin(), gettysburg_weights.end());
     all_weights.insert(all_weights.end(), number_weights.begin(), number_weights.end());
     
+    printf("Creating mixed embedding with %zu source embeddings\n", all_embeddings.size());
+    
     // Create the mixed embedding
     std::vector<float> mixed_embedding = create_weighted_embedding(all_embeddings, all_weights);
     
+    // Verify the mixed embedding
+    printf("Mixed embedding created with %zu elements\n", mixed_embedding.size());
+    
+    // Print a few values to verify
+    printf("Mixed embedding sample values:\n");
+    for (int i = 0; i < std::min(5, (int)mixed_embedding.size()); i++) {
+        printf("  [%d]: %f\n", i, mixed_embedding[i]);
+    }
+    
     // Create batch with the mixed embedding
+    printf("Initializing batch with embedding size %d\n", n_embd);
     llama_batch batch = llama_batch_init(1, n_embd, 1);
     
     // Copy mixed embedding to batch
+    if (mixed_embedding.size() != (size_t)n_embd) {
+        fprintf(stderr, "Error: Mixed embedding size (%zu) doesn't match model's embedding size (%d)\n", 
+                mixed_embedding.size(), n_embd);
+        llama_batch_free(batch);
+        llama_free(ctx);
+        llama_model_free(model);
+        return 1;
+    }
+    
+    printf("Copying embedding to batch...\n");
     memcpy(batch.embd, mixed_embedding.data(), n_embd * sizeof(float));
+    
     batch.n_tokens = 1;
     batch.pos[0] = 0;
     batch.n_seq_id[0] = 1;
@@ -228,13 +301,16 @@ int main(int argc, char** argv) {
     printf("Running inference with mixed embedding...\n");
     
     // Run inference with the mixed embedding
-    if (llama_decode(ctx, batch) != 0) {
-        fprintf(stderr, "Failed to decode\n");
+    int decode_result = llama_decode(ctx, batch);
+    if (decode_result != 0) {
+        fprintf(stderr, "Failed to decode (error code: %d)\n", decode_result);
         llama_batch_free(batch);
         llama_free(ctx);
         llama_model_free(model);
         return 1;
     }
+    
+    printf("Inference successful!\n");
     
     // Get the output logits
     float* logits = llama_get_logits(ctx);
